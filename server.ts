@@ -181,15 +181,14 @@ function cleanUpOldGenerations() {
   }
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+export const app = express();
+const PORT = 3000;
 
-  // Run initial cleanup on startup
-  cleanUpOldGenerations();
+// Run initial cleanup on startup
+cleanUpOldGenerations();
 
-  app.use(express.json({ limit: "50mb" }));
-  app.use("/output", express.static(path.join(process.cwd(), "output")));
+app.use(express.json({ limit: "50mb" }));
+app.use("/output", express.static(path.join(process.cwd(), "output")));
 
   // API routes FIRST
   app.post("/api/cancel-show", (req, res) => {
@@ -1369,52 +1368,54 @@ for f in files:
   });
 
   // Vite middleware for development (with a robust fallback to dev middleware if dist/index.html is missing)
-  const distPath = path.join(process.cwd(), "dist");
-  const indexHtmlExists = fs.existsSync(path.join(distPath, "index.html"));
+  if (!process.env.VERCEL) {
+    const distPath = path.join(process.cwd(), "dist");
+    const indexHtmlExists = fs.existsSync(path.join(distPath, "index.html"));
 
-  if (process.env.NODE_ENV !== "production" || !indexHtmlExists) {
-    if (process.env.NODE_ENV === "production") {
-      console.warn(
-        "Production mode enabled, but dist/index.html not found. Falling back to Vite dev server middleware to ensure app stays operational.",
-      );
+    function startListening(port: number) {
+      const server = app
+        .listen(port, "0.0.0.0", () => {
+          console.log(`Server running on http://localhost:${port}`);
+        })
+        .on("error", (err: any) => {
+          if (err.code === "EADDRINUSE") {
+            console.log(`Port ${port} is in use, trying ${port + 1}...`);
+            startListening(port + 1);
+          } else {
+            console.error(err);
+          }
+        });
+
+      // Disable timeouts for long-running agent interactions
+      server.setTimeout(0);
+      server.requestTimeout = 0;
+      server.headersTimeout = 0;
+      server.keepAliveTimeout = 0;
     }
-    const { createServer: createViteServer } = await import("vite");
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    app.use(express.static(distPath));
-    // Express 5 format for catch-all (if using express 5) or Express 4. Let's use *all for v5 or * for v4.
-    // We can use default express 4 catch-all
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+
+    if (process.env.NODE_ENV !== "production" || !indexHtmlExists) {
+      if (process.env.NODE_ENV === "production") {
+        console.warn(
+          "Production mode enabled, but dist/index.html not found. Falling back to Vite dev server middleware to ensure app stays operational.",
+        );
+      }
+      import("vite").then(({ createServer: createViteServer }) => {
+        createViteServer({
+          server: { middlewareMode: true },
+          appType: "spa",
+        }).then((vite) => {
+          app.use(vite.middlewares);
+          startListening(PORT);
+        });
+      });
+    } else {
+      app.use(express.static(distPath));
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+      startListening(PORT);
+    }
   }
 
-  const startListening = (port: number) => {
-    const server = app
-      .listen(port, "0.0.0.0", () => {
-        console.log(`Server running on http://localhost:${port}`);
-      })
-      .on("error", (err: any) => {
-        if (err.code === "EADDRINUSE") {
-          console.log(`Port ${port} is in use, trying ${port + 1}...`);
-          startListening(port + 1);
-        } else {
-          console.error(err);
-        }
-      });
+export default app;
 
-    // Disable timeouts for long-running agent interactions
-    server.setTimeout(0);
-    server.requestTimeout = 0;
-    server.headersTimeout = 0;
-    server.keepAliveTimeout = 0;
-  };
-
-  startListening(PORT);
-}
-
-startServer();
