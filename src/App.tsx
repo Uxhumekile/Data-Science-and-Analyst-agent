@@ -1003,30 +1003,6 @@ const SetupPanel: React.FC<SetupProps> = ({
                 ))}
               </ul>
             )}
-
-            <div className="mt-4 text-[11px] leading-relaxed text-neutral-500 border-t border-neutral-100 pt-3">
-              By using this feature, you confirm that you have the necessary rights to any content that you upload. Do not generate content that infringes on others’ intellectual property or privacy rights. Your use of this generative AI service is subject to our{' '}
-              <a 
-                href="https://policies.google.com/terms/generative-ai/use-policy" 
-                target="_blank" 
-                rel="noopener noreferrer" 
-                className="text-io-blue hover:underline font-medium"
-              >
-                Prohibited Use Policy
-              </a>
-              .
-              <br className="mt-1" />
-              Please note that uploads from Google Workspace may be used to develop and improve Google products and services in accordance with our{' '}
-              <a 
-                href="https://ai.google.dev/gemini-api/terms" 
-                target="_blank" 
-                rel="noopener noreferrer" 
-                className="text-io-blue hover:underline font-medium"
-              >
-                terms
-              </a>
-              .
-            </div>
           </section>
 
           {/* Step 2: question */}
