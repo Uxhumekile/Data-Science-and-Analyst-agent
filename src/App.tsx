@@ -314,6 +314,8 @@ const App: React.FC = () => {
             content: data.content,
             size: file.size,
             gsUri: data.gsUri,
+            supabasePath: data.supabasePath,
+            supabaseUrl: data.url,
             localPath: data.localPath,
             isLocal: data.isLocal
           } as UploadedFile;

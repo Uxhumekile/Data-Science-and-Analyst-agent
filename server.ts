@@ -12,6 +12,12 @@ import {
   API_BASE_URL,
 } from "./server/lib/agentClient.ts";
 import { extractJsonBlocks } from "./server/lib/jsonExtractor.ts";
+import {
+  uploadFileToSupabase,
+  deleteSupabaseFiles,
+  getSupabaseClient,
+  getSupabaseBucketName,
+} from "./server/lib/supabaseClient.ts";
 import fs from "fs";
 import crypto from "crypto";
 import multer from "multer";
@@ -383,22 +389,33 @@ async function startServer() {
         );
         let gsUri: string | undefined = undefined;
         let url: string | undefined = undefined;
+        let supabasePath: string | undefined = undefined;
+        let supabaseBucket: string | undefined = undefined;
 
+        const sessionId =
+          typeof req.body?.sessionId === "string"
+            ? req.body.sessionId.trim()
+            : "default";
+
+        // Store file in Supabase Storage if configured
         try {
-          const sessionId =
-            typeof req.body?.sessionId === "string"
-              ? req.body.sessionId.trim()
-              : "default";
-          const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-          const filename = `uploads/${sessionId}/${uniqueSuffix}-${safeOriginalName}`;
-
-          // Firebase upload omitted
-        } catch (gcsErr) {
-          console.warn("[api/upload] Optional GCS upload omitted:", gcsErr);
+          const supabaseResult = await uploadFileToSupabase({
+            buffer: req.file.buffer,
+            originalName: req.file.originalname,
+            mimeType: req.file.mimetype,
+            sessionId,
+          });
+          if (supabaseResult) {
+            supabasePath = supabaseResult.path;
+            supabaseBucket = supabaseResult.bucket;
+            url = supabaseResult.url || supabaseResult.signedUrl;
+          }
+        } catch (supabaseErr) {
+          console.warn("[api/upload] Supabase storage upload warning:", supabaseErr);
         }
 
         console.log(
-          `[api/upload] Processed inline CSV upload for ${safeOriginalName} (${req.file.size} bytes)`,
+          `[api/upload] Processed CSV upload for ${safeOriginalName} (${req.file.size} bytes)${supabasePath ? ` -> Supabase: ${supabasePath}` : ""}`,
         );
         return res.json({
           name: req.file.originalname,
@@ -406,6 +423,8 @@ async function startServer() {
           size: req.file.size,
           gsUri,
           url,
+          supabasePath,
+          supabaseBucket,
         });
       } catch (err: any) {
         console.error("[api/upload] CSV upload failed:", err);
@@ -417,7 +436,16 @@ async function startServer() {
   );
 
   async function deleteGcsFiles(files: any[]) {
-    // Disabled
+    try {
+      const supabasePaths = files
+        .map((f) => f.supabasePath)
+        .filter((p): p is string => typeof p === "string" && p.length > 0);
+      if (supabasePaths.length > 0) {
+        await deleteSupabaseFiles(supabasePaths);
+      }
+    } catch (err) {
+      console.warn("[deleteGcsFiles] Failed to cleanup files:", err);
+    }
   }
 
   app.get("/api/download-file", async (req, res) => {
