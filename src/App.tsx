@@ -8,7 +8,7 @@ import autoTable from 'jspdf-autotable';
 import type {
   ActivityLog, AnalysisReport, ReportChart, ReportTable, UploadedFile,
 } from './types';
-import { LogIn, LogOut, User as UserIcon, Check, Sparkles, Presentation, Database } from 'lucide-react';
+import { LogIn, LogOut, User as UserIcon, Check, Sparkles, Presentation, Database, CheckCircle2, AlertCircle, X, FileText, UploadCloud } from 'lucide-react';
 
 const PixelatedHeader: React.FC = () => {
   return (
@@ -215,6 +215,7 @@ const App: React.FC = () => {
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [uploadSuccessMsg, setUploadSuccessMsg] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
   const [environmentId, setEnvironmentId] = useState<string | null>(null);
@@ -222,8 +223,6 @@ const App: React.FC = () => {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [viewedMessageId, setViewedMessageId] = useState<string | null>(null);
   const activeMessageIdRef = useRef<string | null>(null);
-
-
 
   const abortRef = useRef<AbortController | null>(null);
   const generationIdRef = useRef<string | null>(null);
@@ -238,18 +237,36 @@ const App: React.FC = () => {
   const canRun = status !== 'running' && question.trim() !== '' && files.length > 0;
 
   const addFiles = useCallback(async (fileList: FileList | File[]) => {
-    const csvs = Array.from(fileList).filter((f) => /\.csv$/i.test(f.name));
-    if (csvs.length === 0) return;
+    const csvs = Array.from(fileList).filter((f) => {
+      const name = (f.name || '').toLowerCase();
+      return (
+        name.endsWith('.csv') ||
+        name.endsWith('.tsv') ||
+        name.endsWith('.txt') ||
+        f.type === 'text/csv' ||
+        f.type === 'text/plain' ||
+        f.type === 'application/vnd.ms-excel' ||
+        f.type === 'text/comma-separated-values' ||
+        !f.type
+      );
+    });
 
-    const MAX_INLINE_SIZE = 1 * 1024 * 1024; // 1MB limit for inline analysis
+    if (csvs.length === 0) {
+      setErrorMsg('Please upload a valid CSV data file (.csv).');
+      setStatus('error');
+      return;
+    }
+
+    const MAX_INLINE_SIZE = 10 * 1024 * 1024; // 10MB limit for inline analysis
     const oversizedFiles = csvs.filter((f) => f.size > MAX_INLINE_SIZE);
     if (oversizedFiles.length > 0) {
-      setErrorMsg(`File size exceeds 1MB inline limit: ${oversizedFiles.map(f => `${f.name} (${(f.size / (1024 * 1024)).toFixed(2)}MB)`).join(', ')}. For CSV files > 1MB, please use the "Paste a GCS URI" option!`);
+      setErrorMsg(`File size exceeds 10MB inline limit: ${oversizedFiles.map(f => `${f.name} (${(f.size / (1024 * 1024)).toFixed(2)}MB)`).join(', ')}. For CSV files > 10MB, please use the "Paste a GCS URI" option!`);
       setStatus('error');
       return;
     }
 
     setStatus('uploading');
+    setUploadSuccessMsg(null);
     try {
       const uploaded = await Promise.all(
         csvs.map(async (file) => {
@@ -262,23 +279,25 @@ const App: React.FC = () => {
           let res: Response | null = null;
 
           for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            res = await fetch('/api/upload', {
-              method: 'POST',
-              body: formData,
-              redirect: 'manual',
-            });
-
-            const wasRedirected =
-              res.type === 'opaqueredirect' ||
-              res.redirected ||
-              (res.status >= 300 && res.status < 400);
-
-            if (!wasRedirected) break;
-            if (attempt === maxAttempts) {
-              throw new Error('The upload service kept redirecting the request. Please try again.');
+            try {
+              res = await fetch('/api/upload', {
+                method: 'POST',
+                body: formData,
+              });
+            } catch (fetchErr: any) {
+              if (attempt === maxAttempts) {
+                throw fetchErr;
+              }
+              await new Promise(resolve => window.setTimeout(resolve, retryDelayMs));
+              continue;
             }
 
-            await new Promise(resolve => window.setTimeout(resolve, retryDelayMs));
+            if (res && res.status >= 300 && res.status < 400 && attempt < maxAttempts) {
+              await new Promise(resolve => window.setTimeout(resolve, retryDelayMs));
+              continue;
+            }
+
+            break;
           }
 
           if (!res) {
@@ -291,12 +310,12 @@ const App: React.FC = () => {
             if (contentType.includes('application/json')) {
               const errData = await res.json().catch(() => ({}));
               if (errData.error) {
-                try {
+                try { 
                    const parsed = JSON.parse(errData.error);
                    if (parsed.error && parsed.error.message) {
                      backendErr = parsed.error.message;
                    }
-                } catch {
+                } catch { 
                    backendErr = errData.error;
                 }
               }
@@ -328,6 +347,14 @@ const App: React.FC = () => {
       });
       setStatus('idle');
       setErrorMsg(null);
+      const totalCount = uploaded.length;
+      const fileNames = uploaded.map((f) => f.name).join(', ');
+      const totalMb = (uploaded.reduce((acc, f) => acc + (f.size || 0), 0) / (1024 * 1024)).toFixed(2);
+      setUploadSuccessMsg(
+        totalCount === 1
+          ? `Successfully uploaded "${uploaded[0].name}" (${(uploaded[0].size / 1024).toFixed(1)} KB). Ready for analysis!`
+          : `Successfully uploaded ${totalCount} files: ${fileNames} (${totalMb} MB). Ready for analysis!`
+      );
     } catch (err: any) {
       setErrorMsg(err.message || 'Error uploading files');
       setStatus('error');
@@ -354,6 +381,7 @@ const App: React.FC = () => {
       return Array.from(byName.values());
     });
     setErrorMsg(null);
+    setUploadSuccessMsg(`Successfully added GCS dataset reference: "${name}". Ready for analysis!`);
   }, []);
 
   const onDrop = useCallback(
@@ -365,7 +393,10 @@ const App: React.FC = () => {
     [addFiles]
   );
 
-  const removeFile = (name: string) => setFiles((prev) => prev.filter((f) => f.name !== name));
+  const removeFile = (name: string) => {
+    setFiles((prev) => prev.filter((f) => f.name !== name));
+    setUploadSuccessMsg(null);
+  };
 
   const pushLog = (log: Omit<ActivityLog, 'id' | 'timestamp'>) => {
     const fullLog: ActivityLog = {
@@ -520,26 +551,29 @@ const App: React.FC = () => {
       let response: Response | null = null;
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        response = await fetch('/api/analyze', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-          redirect: 'manual',
-        });
-
-        const wasRedirected =
-          response.type === 'opaqueredirect' ||
-          response.redirected ||
-          (response.status >= 300 && response.status < 400);
-
-        if (!wasRedirected) break;
-        if (attempt === maxAttempts) {
-          throw new Error('The analysis service kept redirecting the request. Please try again.');
+        try {
+          response = await fetch('/api/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+          });
+        } catch (fetchErr: any) {
+          if (attempt === maxAttempts) {
+            throw fetchErr;
+          }
+          setStage(`Analysis service is starting. Retrying in ${retryDelayMs / 1000} seconds...`);
+          await waitForRetry(retryDelayMs, controller.signal);
+          continue;
         }
 
-        setStage(`Analysis service is not ready. Retrying in ${retryDelayMs / 1000} seconds...`);
-        await waitForRetry(retryDelayMs, controller.signal);
+        if (response && response.status >= 300 && response.status < 400 && attempt < maxAttempts) {
+          setStage(`Analysis service is not ready. Retrying in ${retryDelayMs / 1000} seconds...`);
+          await waitForRetry(retryDelayMs, controller.signal);
+          continue;
+        }
+
+        break;
       }
 
       if (!response) {
@@ -793,6 +827,9 @@ const App: React.FC = () => {
                 examples={examples}
                 canRun={canRun}
                 isUploading={status === 'uploading'}
+                uploadSuccessMsg={uploadSuccessMsg}
+                errorMsg={errorMsg}
+                onDismissSuccessMsg={() => setUploadSuccessMsg(null)}
                 onDragOver={(e) => {
                   e.preventDefault();
                   setDragOver(true);
@@ -868,6 +905,9 @@ interface SetupProps {
   examples: string[];
   canRun: boolean;
   isUploading?: boolean;
+  uploadSuccessMsg?: string | null;
+  errorMsg?: string | null;
+  onDismissSuccessMsg?: () => void;
   onDragOver: (e: React.DragEvent) => void;
   onDragLeave: () => void;
   onDrop: (e: React.DragEvent) => void;
@@ -880,6 +920,7 @@ interface SetupProps {
 
 const SetupPanel: React.FC<SetupProps> = ({
   files, dragOver, question, examples, canRun, isUploading = false,
+  uploadSuccessMsg, errorMsg, onDismissSuccessMsg,
   onDragOver, onDragLeave, onDrop, onPickFiles, onAddGcsUri, onRemoveFile,
   onQuestionChange, onRun
 }) => {
@@ -906,9 +947,12 @@ const SetupPanel: React.FC<SetupProps> = ({
       <div className="space-y-4">
           {/* Step 1: dataset */}
           <section className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm">
-            <div className="mb-3 flex items-center gap-2 text-sm font-medium text-neutral-700">
-              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-neutral-900 text-[11px] text-white">1</span>
-              Choose a dataset
+            <div className="mb-3 flex items-center justify-between text-sm font-medium text-neutral-700">
+              <div className="flex items-center gap-2">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-neutral-900 text-[11px] text-white">1</span>
+                Choose a dataset
+              </div>
+              <span className="text-xs text-neutral-500 font-medium">Up to 10MB per file</span>
             </div>
 
             <div
@@ -931,14 +975,14 @@ const SetupPanel: React.FC<SetupProps> = ({
                 </div>
               ) : (
                 <>
-                  <p className="text-sm font-medium text-neutral-700">Drop CSV file(s) here or click to browse (&le; 1MB)</p>
-                  <p className="mt-1 text-xs text-neutral-400">Multiple related CSVs are supported for inline agent analysis</p>
+                  <p className="text-sm font-medium text-neutral-700">Drop CSV file(s) here or click to browse (&le; 10MB)</p>
+                  <p className="mt-1 text-xs text-neutral-400">Multiple CSVs supported. Files are saved and validated immediately upon drop</p>
                 </>
               )}
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".csv,text/csv"
+                accept=".csv,text/csv,text/plain"
                 multiple
                 className="hidden"
                 disabled={isUploading}
@@ -946,14 +990,41 @@ const SetupPanel: React.FC<SetupProps> = ({
               />
             </div>
 
-            {/* GCS Link input for files larger than 1MB */}
+            {/* Upload Success Alert */}
+            {uploadSuccessMsg && (
+              <div className="mt-3 flex items-start justify-between gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900 shadow-sm">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+                  <span className="font-medium">{uploadSuccessMsg}</span>
+                </div>
+                {onDismissSuccessMsg && (
+                  <button
+                    onClick={onDismissSuccessMsg}
+                    className="text-emerald-700 hover:text-emerald-950 p-0.5"
+                    title="Dismiss"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Error Message Alert */}
+            {errorMsg && (
+              <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-900 shadow-sm">
+                <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                <div className="font-medium">{errorMsg}</div>
+              </div>
+            )}
+
+            {/* GCS Link input for files larger than 10MB */}
             <div className="mt-4 border-t border-neutral-100 pt-4">
               <div className="flex items-center justify-between mb-2">
                 <label className="text-xs font-semibold text-neutral-700 flex items-center gap-1.5">
                   <Database className="h-3.5 w-3.5 text-io-blue" />
-                  Paste a GCS URI for CSVs larger than 1MB
+                  Paste a GCS URI for CSVs larger than 10MB
                 </label>
-                <span className="text-[11px] text-neutral-400">Bypasses inline 1MB limit</span>
+                <span className="text-[11px] text-neutral-400">Direct cloud ingestion</span>
               </div>
               <div className="flex gap-2">
                 <input
@@ -980,30 +1051,40 @@ const SetupPanel: React.FC<SetupProps> = ({
             </div>
 
             {files.length > 0 && (
-              <ul className="mt-3 space-y-2">
-                {files.map((f) => (
-                  <li
-                     key={f.name}
-                     className="flex items-center justify-between rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm"
-                  >
-                     <span className="flex items-center gap-2 truncate max-w-[80%]">
-                       <span className="truncate font-medium text-neutral-800">{f.name}</span>
-                       <span className="text-[11px] px-2 py-0.5 rounded-full bg-neutral-200/80 text-neutral-600 font-medium truncate">
-                         {f.isGcsUri || (f.gsUri && !f.content)
-                           ? `GCS • ${f.gsUri}`
-                           : `Inline CSV • ${f.size ? (f.size / 1024).toFixed(1) : (f.content ? (f.content.length / 1024).toFixed(1) : '0')} KB`}
-                       </span>
-                     </span>
-                     <button 
-                       disabled={isUploading} 
-                       onClick={(e) => { e.stopPropagation(); onRemoveFile(f.name); }} 
-                       className="text-neutral-400 hover:text-io-red font-medium text-xs px-1.5 py-0.5 disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
-                     >
-                       Remove
-                     </button>
-                  </li>
-                ))}
-              </ul>
+              <div className="mt-4 space-y-2">
+                <div className="flex items-center justify-between text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">
+                  <span>Ready Datasets ({files.length})</span>
+                  <span className="text-emerald-600 flex items-center gap-1 font-medium text-[11px]">
+                    <CheckCircle2 className="h-3 w-3" /> Ready for analysis
+                  </span>
+                </div>
+                <ul className="space-y-1.5">
+                  {files.map((f) => (
+                    <li
+                       key={f.name}
+                       className="flex items-center justify-between rounded-lg border border-neutral-200 bg-neutral-50 px-3.5 py-2.5 text-xs transition hover:bg-neutral-100/70"
+                    >
+                       <div className="flex items-center gap-2.5 truncate max-w-[80%]">
+                         <FileText className="h-4 w-4 text-io-blue shrink-0" />
+                         <span className="truncate font-semibold text-neutral-800">{f.name}</span>
+                         <span className="text-[10px] px-2 py-0.5 rounded-md bg-white border border-neutral-200 text-neutral-600 font-mono truncate">
+                           {f.isGcsUri || (f.gsUri && !f.content)
+                             ? `GCS • ${f.gsUri}`
+                             : `Inline CSV • ${f.size ? (f.size / (1024 * 1024) >= 1 ? `${(f.size / (1024 * 1024)).toFixed(2)} MB` : `${(f.size / 1024).toFixed(1)} KB`) : (f.content ? `${(f.content.length / 1024).toFixed(1)} KB` : 'Uploaded')}`}
+                         </span>
+                       </div>
+                       <button 
+                         disabled={isUploading} 
+                         onClick={(e) => { e.stopPropagation(); onRemoveFile(f.name); }} 
+                         className="text-neutral-400 hover:text-red-600 font-medium text-xs p-1 disabled:opacity-30 disabled:cursor-not-allowed shrink-0 cursor-pointer"
+                         title="Remove file"
+                       >
+                         <X className="h-3.5 w-3.5" />
+                       </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </section>
 
@@ -1618,93 +1699,98 @@ const ReportView: React.FC<{ report: AnalysisReport }> = ({ report }) => {
 
       const pageHeight = pdf.internal.pageSize.getHeight();
       const pageWidth = pdf.internal.pageSize.getWidth();
-      const margin = 15;
+      const margin = 14;
       const contentWidth = pageWidth - margin * 2;
-      let y = 15;
+      let y = 14;
 
       const checkPageBreak = (neededHeight: number) => {
-        if (y + neededHeight > pageHeight - 20) {
+        if (y + neededHeight > pageHeight - 18) {
           pdf.addPage();
-          y = 20;
+          y = 16;
           return true;
         }
         return false;
       };
 
-      // Top accent bar
+      // Top Google I/O accent line
       pdf.setFillColor(66, 133, 244);
       pdf.rect(0, 0, pageWidth, 4, 'F');
 
-      y = 15;
+      y = 14;
       pdf.setFont('helvetica', 'bold');
-      pdf.setFontSize(9);
+      pdf.setFontSize(8.5);
       pdf.setTextColor(66, 133, 244);
       pdf.text(`${(report.dataset_name || 'DATASET').toUpperCase()} · EXECUTIVE INTELLIGENCE REPORT`, margin, y);
 
-      y += 8;
+      if (report.generated_at) {
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(8);
+        pdf.setTextColor(156, 163, 175);
+        pdf.text(report.generated_at, pageWidth - margin, y, { align: 'right' });
+      }
+
+      y += 7;
       pdf.setFont('helvetica', 'bold');
-      pdf.setFontSize(20);
-      pdf.setTextColor(31, 41, 55);
+      pdf.setFontSize(18);
+      pdf.setTextColor(23, 23, 23);
       const titleLines = pdf.splitTextToSize(report.title || 'Analysis Report', contentWidth);
       pdf.text(titleLines, margin, y);
-      y += titleLines.length * 8 + 1;
+      y += titleLines.length * 7 + 1;
 
-      // Inquiry
+      // Inquiry / Question
       if (report.question) {
         pdf.setFont('helvetica', 'normal');
-        pdf.setFontSize(10.5);
+        pdf.setFontSize(9.5);
         pdf.setTextColor(75, 85, 99);
         const qLines = pdf.splitTextToSize(`Business Inquiry: ${report.question}`, contentWidth);
         pdf.text(qLines, margin, y);
-        y += qLines.length * 6 + 4;
+        y += qLines.length * 5 + 3;
       }
 
-      // Divider
+      // Divider line
       pdf.setDrawColor(229, 231, 235);
       pdf.setLineWidth(0.5);
       pdf.line(margin, y, margin + contentWidth, y);
-      y += 8;
+      y += 6;
 
-      // Executive Summary Box
+      // 1. Executive Summary Box
       if (report.executive_summary) {
         pdf.setFont('helvetica', 'bold');
-        pdf.setFontSize(13);
-        pdf.setTextColor(31, 41, 55);
-        pdf.text('Executive AI Takeaway', margin, y);
-        y += 6;
+        pdf.setFontSize(11.5);
+        pdf.setTextColor(23, 23, 23);
+        pdf.text('Executive Summary', margin, y);
+        y += 5;
 
         pdf.setFont('helvetica', 'normal');
-        pdf.setFontSize(10);
+        pdf.setFontSize(9);
         pdf.setTextColor(55, 65, 81);
         const execLines = pdf.splitTextToSize(report.executive_summary, contentWidth - 10);
-        const boxHeight = execLines.length * 5 + 8;
+        const boxHeight = execLines.length * 4.6 + 8;
 
         checkPageBreak(boxHeight + 5);
 
-        pdf.setFillColor(243, 244, 246);
-        pdf.setDrawColor(209, 213, 219);
+        pdf.setFillColor(248, 250, 252);
+        pdf.setDrawColor(226, 232, 240);
         pdf.roundedRect(margin, y, contentWidth, boxHeight, 2, 2, 'FD');
-
-        pdf.text(execLines, margin + 5, y + 7);
-        y += boxHeight + 10;
+        pdf.text(execLines, margin + 5, y + 6);
+        y += boxHeight + 8;
       }
 
-      // KPI Metrics
+      // 2. Key Performance Indicators (KPI Overview)
       if (report.insights && report.insights.length > 0) {
-        checkPageBreak(35);
+        checkPageBreak(30);
         pdf.setFont('helvetica', 'bold');
-        pdf.setFontSize(13);
-        pdf.setTextColor(31, 41, 55);
+        pdf.setFontSize(11.5);
+        pdf.setTextColor(23, 23, 23);
         pdf.text('Key Performance Indicators', margin, y);
-        y += 7;
+        y += 6;
 
-        const kpis = report.insights.slice(0, 4);
+        const kpis = report.insights;
         const colWidth = (contentWidth - 6) / 2;
 
         for (let i = 0; i < kpis.length; i += 2) {
           const rowKpis = kpis.slice(i, i + 2);
-          const maxRowHeight = 26;
-
+          const maxRowHeight = 24;
           checkPageBreak(maxRowHeight + 4);
 
           rowKpis.forEach((kpi, colIdx) => {
@@ -1716,53 +1802,131 @@ const ReportView: React.FC<{ report: AnalysisReport }> = ({ report }) => {
             pdf.setFont('helvetica', 'bold');
             pdf.setFontSize(8);
             pdf.setTextColor(107, 114, 128);
-            pdf.text((kpi.metric || kpi.title || '').toUpperCase().slice(0, 32), x + 4, y + 6);
+            pdf.text((kpi.metric || kpi.title || '').toUpperCase().slice(0, 32), x + 4, y + 5.5);
 
             if (kpi.value) {
               pdf.setFont('helvetica', 'bold');
-              pdf.setFontSize(11);
+              pdf.setFontSize(10.5);
               pdf.setTextColor(66, 133, 244);
-              pdf.text(String(kpi.value).slice(0, 25), x + 4, y + 13);
+              pdf.text(String(kpi.value).slice(0, 28), x + 4, y + 12);
             }
 
             pdf.setFont('helvetica', 'normal');
-            pdf.setFontSize(8.5);
-            pdf.setTextColor(55, 65, 81);
+            pdf.setFontSize(7.5);
+            pdf.setTextColor(75, 85, 99);
             const detailLines = pdf.splitTextToSize(kpi.detail || kpi.title || '', colWidth - 8);
-            pdf.text(detailLines.slice(0, 2), x + 4, y + (kpi.value ? 19 : 13));
+            pdf.text(detailLines.slice(0, 2), x + 4, y + (kpi.value ? 17.5 : 12));
           });
 
-          y += maxRowHeight + 6;
+          y += maxRowHeight + 5;
         }
-        y += 4;
+        y += 3;
       }
 
-      // Charts
+      // 3. Comprehensive AI Insights & Findings (from Insights & Actions)
+      if (report.insights && report.insights.length > 0) {
+        checkPageBreak(30);
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(11.5);
+        pdf.setTextColor(23, 23, 23);
+        pdf.text('Comprehensive AI Insights & Findings', margin, y);
+        y += 6;
+
+        for (let i = 0; i < report.insights.length; i++) {
+          const ins = report.insights[i];
+          pdf.setFont('helvetica', 'bold');
+          pdf.setFontSize(9.5);
+
+          const titleText = `${i + 1}.  ${ins.title}`;
+          const valText = ins.value ? ` [${ins.value}]` : '';
+          const headerLine = `${titleText}${valText}`;
+          const headerLines = pdf.splitTextToSize(headerLine, contentWidth - 8);
+
+          pdf.setFont('helvetica', 'normal');
+          pdf.setFontSize(8.5);
+          const detailLines = pdf.splitTextToSize(ins.detail, contentWidth - 10);
+
+          const cardHeight = headerLines.length * 4.8 + detailLines.length * 4.2 + 8;
+          checkPageBreak(cardHeight + 4);
+
+          pdf.setFillColor(255, 255, 255);
+          pdf.setDrawColor(229, 231, 235);
+          pdf.roundedRect(margin, y, contentWidth, cardHeight, 1.5, 1.5, 'FD');
+
+          // Left blue accent bar
+          pdf.setFillColor(66, 133, 244);
+          pdf.rect(margin, y, 2.5, cardHeight, 'F');
+
+          pdf.setFont('helvetica', 'bold');
+          pdf.setFontSize(9);
+          pdf.setTextColor(23, 23, 23);
+          pdf.text(headerLines, margin + 6, y + 5.5);
+
+          pdf.setFont('helvetica', 'normal');
+          pdf.setFontSize(8);
+          pdf.setTextColor(75, 85, 99);
+          pdf.text(detailLines, margin + 6, y + 5.5 + headerLines.length * 4.8);
+
+          y += cardHeight + 4;
+        }
+        y += 3;
+      }
+
+      // 4. Strategic Recommendations & Actions Roadmap (from Insights & Actions)
+      if (report.recommendations && report.recommendations.length > 0) {
+        checkPageBreak(30);
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(11.5);
+        pdf.setTextColor(23, 23, 23);
+        pdf.text('Strategic Recommendations & Action Roadmap', margin, y);
+        y += 6;
+
+        for (let idx = 0; idx < report.recommendations.length; idx++) {
+          const rec = report.recommendations[idx];
+          pdf.setFont('helvetica', 'normal');
+          pdf.setFontSize(8.5);
+          pdf.setTextColor(55, 65, 81);
+          const recLines = pdf.splitTextToSize(`${idx + 1}.  ${rec}`, contentWidth - 8);
+          const itemH = recLines.length * 4.4 + 4;
+
+          checkPageBreak(itemH + 2);
+
+          pdf.setFillColor(240, 253, 244); // light emerald #f0fdf4
+          pdf.setDrawColor(187, 247, 208); // emerald-200
+          pdf.roundedRect(margin, y, contentWidth, itemH, 1.5, 1.5, 'FD');
+
+          pdf.text(recLines, margin + 4, y + 4.5);
+          y += itemH + 3;
+        }
+        y += 3;
+      }
+
+      // 5. Visual Analytics & Charts (from Print Preview)
       const validCharts = report.charts?.filter((c) => c.image) || [];
       if (validCharts.length > 0) {
         checkPageBreak(30);
         pdf.setFont('helvetica', 'bold');
-        pdf.setFontSize(13);
-        pdf.setTextColor(31, 41, 55);
-        pdf.text('Visual Analytics', margin, y);
-        y += 8;
+        pdf.setFontSize(11.5);
+        pdf.setTextColor(23, 23, 23);
+        pdf.text('Visual Analytics & Charts', margin, y);
+        y += 6;
 
         for (const chart of validCharts) {
-          checkPageBreak(40);
+          checkPageBreak(45);
 
           pdf.setFont('helvetica', 'bold');
-          pdf.setFontSize(11);
+          pdf.setFontSize(10);
           pdf.setTextColor(31, 41, 55);
           pdf.text(chart.title || 'Chart', margin, y);
           y += 5;
 
           if (chart.caption) {
             pdf.setFont('helvetica', 'normal');
-            pdf.setFontSize(9);
+            pdf.setFontSize(8);
             pdf.setTextColor(107, 114, 128);
             const capLines = pdf.splitTextToSize(chart.caption, contentWidth);
             pdf.text(capLines, margin, y);
-            y += capLines.length * 4.5 + 3;
+            y += capLines.length * 4 + 2;
           }
 
           try {
@@ -1822,39 +1986,53 @@ const ReportView: React.FC<{ report: AnalysisReport }> = ({ report }) => {
             });
 
             const maxImgW = contentWidth;
-            const maxImgH = 100;
+            const maxImgH = 95;
             let imgW = maxImgW;
             let imgH = (imgProps.height * imgW) / imgProps.width;
-
             if (imgH > maxImgH) {
               imgH = maxImgH;
               imgW = (imgProps.width * imgH) / imgProps.height;
             }
 
-            checkPageBreak(imgH + 10);
+            checkPageBreak(imgH + 8);
 
             const imgX = margin + (contentWidth - imgW) / 2;
             pdf.setDrawColor(243, 244, 246);
             pdf.rect(imgX - 1, y - 1, imgW + 2, imgH + 2);
             pdf.addImage(imgProps.dataUrl, 'PNG', imgX, y, imgW, imgH);
-            y += imgH + 10;
+            y += imgH + 8;
           } catch (err) {
             console.warn('Could not render chart in PDF', err);
           }
         }
       }
 
-      // Tables
+      // 6. Supporting Data Tables (from Print Preview)
       if (report.tables && report.tables.length > 0) {
         checkPageBreak(25);
         pdf.setFont('helvetica', 'bold');
-        pdf.setFontSize(13);
-        pdf.setTextColor(31, 41, 55);
+        pdf.setFontSize(11.5);
+        pdf.setTextColor(23, 23, 23);
         pdf.text('Supporting Data Tables', margin, y);
         y += 6;
 
         for (const table of report.tables) {
           checkPageBreak(20);
+
+          if (table.title) {
+            pdf.setFont('helvetica', 'bold');
+            pdf.setFontSize(9);
+            pdf.setTextColor(31, 41, 55);
+            pdf.text(table.title, margin, y);
+            y += 4;
+          }
+          if (table.caption) {
+            pdf.setFont('helvetica', 'normal');
+            pdf.setFontSize(7.5);
+            pdf.setTextColor(107, 114, 128);
+            pdf.text(table.caption, margin, y);
+            y += 3.5;
+          }
 
           autoTable(pdf, {
             startY: y,
@@ -1867,60 +2045,54 @@ const ReportView: React.FC<{ report: AnalysisReport }> = ({ report }) => {
               fillColor: [66, 133, 244],
               textColor: 255,
               fontStyle: 'bold',
-              fontSize: 8.5
+              fontSize: 7.5
             },
             bodyStyles: {
               textColor: [55, 65, 81],
-              fontSize: 8
+              fontSize: 7
             },
             alternateRowStyles: {
               fillColor: [249, 250, 251]
             }
           });
 
-          y = (pdf as any).lastAutoTable?.finalY ? (pdf as any).lastAutoTable.finalY + 10 : y + 30;
+          y = (pdf as any).lastAutoTable?.finalY ? (pdf as any).lastAutoTable.finalY + 8 : y + 25;
         }
       }
 
-      // Recommendations
-      if (report.recommendations && report.recommendations.length > 0) {
-        checkPageBreak(30);
+      // 7. Methodology & Footnotes (from Print Preview)
+      if (report.methodology) {
+        checkPageBreak(20);
         pdf.setFont('helvetica', 'bold');
-        pdf.setFontSize(13);
+        pdf.setFontSize(9);
         pdf.setTextColor(31, 41, 55);
-        pdf.text('Strategic Recommendations', margin, y);
-        y += 7;
+        pdf.text('Analysis Methodology & Execution', margin, y);
+        y += 4;
 
-        report.recommendations.forEach((rec, idx) => {
-          const recLines = pdf.splitTextToSize(`${idx + 1}.  ${rec}`, contentWidth - 6);
-          const itemH = recLines.length * 5 + 3;
-          checkPageBreak(itemH);
-
-          pdf.setFont('helvetica', 'normal');
-          pdf.setFontSize(9.5);
-          pdf.setTextColor(55, 65, 81);
-          pdf.text(recLines, margin + 2, y);
-          y += itemH;
-        });
-        y += 6;
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(7.5);
+        pdf.setTextColor(107, 114, 128);
+        const methLines = pdf.splitTextToSize(report.methodology, contentWidth);
+        pdf.text(methLines, margin, y);
+        y += methLines.length * 3.8 + 4;
       }
 
-      // Footer on all pages
+      // Running Footer on all pages
       const totalPages = pdf.getNumberOfPages();
       for (let i = 1; i <= totalPages; i++) {
         pdf.setPage(i);
         pdf.setFont('helvetica', 'normal');
-        pdf.setFontSize(8);
+        pdf.setFontSize(7.5);
         pdf.setTextColor(156, 163, 175);
         pdf.setDrawColor(243, 244, 246);
-        pdf.line(margin, pageHeight - 12, margin + contentWidth, pageHeight - 12);
+        pdf.line(margin, pageHeight - 10, margin + contentWidth, pageHeight - 10);
 
-        pdf.text(`AI Data Analyst Autonomous BI · Generated ${report.generated_at || new Date().toLocaleDateString()}`, margin, pageHeight - 7);
-        pdf.text(`Page ${i} of ${totalPages}`, margin + contentWidth - 18, pageHeight - 7);
+        pdf.text(`AI Data Analyst Autonomous BI · Generated ${report.generated_at || new Date().toLocaleDateString()}`, margin, pageHeight - 6);
+        pdf.text(`Page ${i} of ${totalPages}`, margin + contentWidth - 16, pageHeight - 6);
       }
 
       const cleanName = (report.dataset_name || 'AI_Analysis').replace(/[^a-zA-Z0-9]/g, '_');
-      pdf.save(`${cleanName}_Executive_Dashboard.pdf`);
+      pdf.save(`${cleanName}_Executive_Intelligence_Report.pdf`);
     } catch (err) {
       console.error('PDF export failed:', err);
       alert('Failed to generate PDF. Please try again.');
@@ -2182,6 +2354,31 @@ const ReportView: React.FC<{ report: AnalysisReport }> = ({ report }) => {
       )}
 
       {/* Tab 5: Print Preview OR Hidden Print Target */}
+      {activeTab === 'print' && (
+        <div className="max-w-4xl mx-auto flex items-center justify-between bg-blue-50/80 border border-blue-200 px-6 py-4 rounded-2xl mb-4">
+          <div>
+            <h3 className="text-sm font-bold text-neutral-900">Executive Print & PDF Preview</h3>
+            <p className="text-xs text-neutral-600 mt-0.5">This view mirrors the exact structured output generated in the PDF export.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={exportDashboardToPDF}
+              disabled={isExportingPdf}
+              className="inline-flex items-center gap-2 rounded-xl bg-io-blue px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-blue-600 transition disabled:opacity-50 cursor-pointer"
+            >
+              <FileText className="h-3.5 w-3.5" />
+              {isExportingPdf ? 'Exporting PDF...' : 'Download Complete PDF'}
+            </button>
+            <button
+              onClick={() => window.print()}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-300 bg-white px-3.5 py-2 text-xs font-semibold text-neutral-700 hover:bg-neutral-50 transition cursor-pointer"
+            >
+              Print / Save
+            </button>
+          </div>
+        </div>
+      )}
+
       <div 
         id="dashboard-printable-report" 
         className={
@@ -2232,6 +2429,25 @@ const ReportView: React.FC<{ report: AnalysisReport }> = ({ report }) => {
                   </div>
                   <h3 className="text-sm font-semibold text-neutral-900 mb-1">{ins.title}</h3>
                   <p className="text-xs text-neutral-600 leading-relaxed">{ins.detail}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Comprehensive AI Insights & Findings */}
+        {report.insights?.length > 0 && (
+          <div>
+            <h2 className="text-base font-bold text-neutral-900 mb-4 uppercase tracking-wide">Comprehensive AI Insights & Findings</h2>
+            <div className="space-y-3">
+              {report.insights.map((ins, idx) => (
+                <div key={idx} className="p-4 rounded-xl border-l-4 border-l-io-blue border-neutral-200 bg-neutral-50/50 break-inside-avoid">
+                  <div className="flex justify-between items-start mb-1">
+                    <h3 className="text-sm font-bold text-neutral-900">{idx + 1}. {ins.title}</h3>
+                    {ins.value && <span className="text-xs font-bold text-io-blue bg-white border border-blue-100 px-2 py-0.5 rounded">{ins.value}</span>}
+                  </div>
+                  {ins.metric && <p className="text-[11px] uppercase font-mono tracking-wider text-neutral-400 mb-1">{ins.metric}</p>}
+                  <p className="text-xs text-neutral-700 leading-relaxed">{ins.detail}</p>
                 </div>
               ))}
             </div>

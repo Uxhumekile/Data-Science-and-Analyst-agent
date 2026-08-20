@@ -374,11 +374,11 @@ async function startServer() {
           return res.status(400).json({ error: "No file uploaded" });
         }
 
-        // Inline limit: 1 MB per file
-        const MAX_INLINE_SIZE = 1 * 1024 * 1024; // 1 MB
+        // Inline limit: 10 MB per file
+        const MAX_INLINE_SIZE = 10 * 1024 * 1024; // 10 MB
         if (req.file.size > MAX_INLINE_SIZE) {
           return res.status(400).json({
-            error: `File "${req.file.originalname}" is ${(req.file.size / (1024 * 1024)).toFixed(2)} MB, which exceeds the 1MB inline limit. For CSV files larger than 1MB, please use the "Paste a GCS URI" option!`,
+            error: `File "${req.file.originalname}" is ${(req.file.size / (1024 * 1024)).toFixed(2)} MB, which exceeds the 10MB inline limit. For CSV files larger than 10MB, please use the "Paste a GCS URI" option!`,
           });
         }
 
