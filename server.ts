@@ -10,14 +10,14 @@ import {
   createInteraction,
   streamInteraction,
   API_BASE_URL,
-} from "./server/lib/agentClient.ts";
-import { extractJsonBlocks } from "./server/lib/jsonExtractor.ts";
+} from "./server/lib/agentClient.js";
+import { extractJsonBlocks } from "./server/lib/jsonExtractor.js";
 import {
   uploadFileToSupabase,
   deleteSupabaseFiles,
   getSupabaseClient,
   getSupabaseBucketName,
-} from "./server/lib/supabaseClient.ts";
+} from "./server/lib/supabaseClient.js";
 import fs from "fs";
 import crypto from "crypto";
 import multer from "multer";
