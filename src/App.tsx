@@ -63,6 +63,21 @@ function createUploadSessionId(): string {
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+const SESSION_STORAGE_KEY = 'analyst-upload-session-id';
+
+function getOrCreateStoredSessionId(): string {
+  try {
+    const existing = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    if (existing) return existing;
+    const created = createUploadSessionId();
+    window.localStorage.setItem(SESSION_STORAGE_KEY, created);
+    return created;
+  } catch {
+    // localStorage unavailable (private browsing, etc.) — fall back to in-memory only.
+    return createUploadSessionId();
+  }
+}
+
 function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const timeoutId = window.setTimeout(() => {
@@ -219,7 +234,8 @@ const App: React.FC = () => {
   const [dragOver, setDragOver] = useState(false);
 
   const [environmentId, setEnvironmentId] = useState<string | null>(null);
-  const [uploadSessionId, setUploadSessionId] = useState(createUploadSessionId);
+  const [uploadSessionId, setUploadSessionId] = useState(getOrCreateStoredSessionId);
+  const [isRehydratingFiles, setIsRehydratingFiles] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [viewedMessageId, setViewedMessageId] = useState<string | null>(null);
   const activeMessageIdRef = useRef<string | null>(null);
@@ -235,6 +251,47 @@ const App: React.FC = () => {
 
   const examples = UPLOAD_EXAMPLES;
   const canRun = status !== 'running' && question.trim() !== '' && files.length > 0;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setIsRehydratingFiles(true);
+      try {
+        const res = await fetch(`/api/session-files?sessionId=${encodeURIComponent(uploadSessionId)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const rehydrated: UploadedFile[] = Array.isArray(data.files)
+          ? data.files.map((f: any) => ({
+              name: f.name,
+              size: f.size ?? 0,
+              supabasePath: f.supabasePath,
+              supabaseBucket: f.supabaseBucket,
+              // No `content` here on purpose — it's fetched server-side from
+              // Supabase at analyze-time via supabasePath, not held in the browser.
+            }))
+          : [];
+        if (!cancelled && rehydrated.length > 0) {
+          setFiles((prev) => {
+            if (prev.length > 0) return prev; // don't clobber files added since mount
+            return rehydrated;
+          });
+          setUploadSuccessMsg(
+            `Restored ${rehydrated.length} previously uploaded file${rehydrated.length === 1 ? '' : 's'} from your last session.`
+          );
+        }
+      } catch (err) {
+        // Non-fatal: worst case, the user just needs to re-upload.
+        console.warn('Failed to rehydrate session files:', err);
+      } finally {
+        if (!cancelled) setIsRehydratingFiles(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Only run this on initial mount for the session id we started with.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const addFiles = useCallback(async (fileList: FileList | File[]) => {
     const csvs = Array.from(fileList).filter((f) => {
@@ -334,6 +391,7 @@ const App: React.FC = () => {
             size: file.size,
             gsUri: data.gsUri,
             supabasePath: data.supabasePath,
+            supabaseBucket: data.supabaseBucket,
             supabaseUrl: data.url,
             localPath: data.localPath,
             isLocal: data.isLocal
@@ -542,7 +600,19 @@ const App: React.FC = () => {
     };
 
     if (!isFollowUp) {
-      payload.files = files;
+      // Prefer sending a lightweight Supabase reference over the full file
+      // content: the server hydrates content from Storage at analyze-time.
+      // Falls back to inline content for GCS-URI files or anything that
+      // for some reason has no supabasePath (e.g. Supabase not configured).
+      payload.files = files.map((f) =>
+        f.supabasePath
+          ? {
+              name: f.name,
+              supabasePath: f.supabasePath,
+              supabaseBucket: f.supabaseBucket,
+            }
+          : f,
+      );
     }
 
     try {
@@ -784,7 +854,13 @@ const App: React.FC = () => {
     setViewedMessageId(null);
     activeMessageIdRef.current = null;
     setFiles([]); // Clear client-side uploaded files state
-    setUploadSessionId(createUploadSessionId());
+    const freshSessionId = createUploadSessionId();
+    setUploadSessionId(freshSessionId);
+    try {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, freshSessionId);
+    } catch {
+      // Ignore — localStorage unavailable.
+    }
 
     // Delete only the GCS files belonging to the analysis being reset.
     fetch('/api/clear-files', {
@@ -2692,5 +2768,3 @@ const DataTable: React.FC<{ table: ReportTable; searchQuery?: string }> = ({ tab
 };
 
 export default App;
-
-

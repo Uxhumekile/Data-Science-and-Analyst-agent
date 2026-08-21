@@ -22,6 +22,34 @@ import fs from "fs";
 import crypto from "crypto";
 import multer from "multer";
 
+async function downloadSupabaseFileText(
+  supabasePath: string,
+  bucketName?: string,
+): Promise<string | null> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return null;
+  const bucket = bucketName || getSupabaseBucketName();
+  try {
+    const { data, error } = await supabase.storage
+      .from(bucket)
+      .download(supabasePath);
+    if (error || !data) {
+      console.warn(
+        `[supabase] Failed to download '${supabasePath}' from bucket '${bucket}':`,
+        error?.message,
+      );
+      return null;
+    }
+    return await data.text();
+  } catch (err: any) {
+    console.warn(
+      `[supabase] Error downloading '${supabasePath}':`,
+      err?.message || err,
+    );
+    return null;
+  }
+}
+
 async function getGcpAccessToken(): Promise<string | null> {
   try {
     const res = await fetch(
@@ -263,13 +291,7 @@ app.use("/output", express.static(path.join(process.cwd(), "output")));
     return new Date().toISOString().split("T")[0];
   }
 
-  let isFirebaseAdminInitialized = false;
-
-  function ensureFirebaseAdmin() {
-    // Firebase is disabled
-  }
-
-  async function getUserHash(req: express.Request): Promise<string | null> {
+  function getUserHash(req: express.Request): string | null {
     // Fallback during local development or unauthenticated preview testing
     return "dev-user-hash";
   }
@@ -321,11 +343,11 @@ app.use("/output", express.static(path.join(process.cwd(), "output")));
     }
   }
 
-  app.get("/api/quota", async (req, res) => {
+  app.get("/api/quota", (req, res) => {
     if (process.env.NODE_ENV !== "production") {
       return res.json({ used: 0, limit: 999999 });
     }
-    const userHash = await getUserHash(req);
+    const userHash = getUserHash(req);
     const limit = getQuotaLimit();
     if (!userHash) {
       return res.json({ used: 0, limit });
@@ -452,7 +474,61 @@ app.use("/output", express.static(path.join(process.cwd(), "output")));
   });
 
   app.post("/api/clear-files", async (req, res) => {
+    const sessionId = typeof req.body?.sessionId === "string" ? req.body.sessionId.trim() : "";
+    if (sessionId) {
+      try {
+        await deleteSupabaseFiles(sessionId);
+      } catch (err) {
+        console.warn("[api/clear-files] Supabase cleanup error:", err);
+      }
+    }
     return res.json({ success: true });
+  });
+
+  app.get("/api/session-files", async (req, res) => {
+    const sessionId =
+      typeof req.query.sessionId === "string" ? req.query.sessionId.trim() : "";
+    if (!sessionId) {
+      return res.status(400).json({ error: "Missing required query param: sessionId" });
+    }
+
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      // Not an error: Supabase just isn't configured, so there's nothing to rehydrate.
+      return res.json({ files: [] });
+    }
+
+    const bucket = getSupabaseBucketName();
+    const folder = `${sessionId}`;
+
+    try {
+      const { data, error } = await supabase.storage.from(bucket).list(folder);
+      if (error) {
+        console.warn(`[api/session-files] List failed for '${folder}':`, error.message);
+        return res.json({ files: [] });
+      }
+
+      const files = (data || [])
+        .filter((entry) => entry.name && !entry.name.endsWith("/"))
+        .map((entry) => {
+          const supabasePath = `${folder}/${entry.name}`;
+          // Uploaded filenames are stored as `${timestamp}-${randomSuffix}-${originalName}` or `${timestamp}-${safeName}`.
+          // Strip leading timestamp prefix so the UI shows the name the user recognizes.
+          const displayName = entry.name.replace(/^\d+-(\d+-)?/, "");
+          return {
+            name: displayName,
+            supabasePath,
+            supabaseBucket: bucket,
+            size: entry.metadata?.size ?? null,
+            updatedAt: entry.updated_at || entry.created_at || null,
+          };
+        });
+
+      return res.json({ files });
+    } catch (err: any) {
+      console.warn("[api/session-files] Error listing files:", err?.message || err);
+      return res.json({ files: [] });
+    }
   });
 
   app.post("/api/analyze", async (req, res) => {
@@ -478,16 +554,40 @@ app.use("/output", express.static(path.join(process.cwd(), "output")));
     // interaction because the report can be retrieved before that interaction
     // has formally completed in the hosted runtime.
     const isFollowUp = !!environmentId;
-    const uploadedFiles: Array<{ name: string; content?: string; gsUri?: string }> =
-      Array.isArray(files)
-        ? files.filter(
-            (f: any) =>
-              f &&
-              typeof f.name === "string" &&
-              ((typeof f.content === "string" && f.content.trim() !== "") ||
-                (typeof f.gsUri === "string" && f.gsUri.trim() !== "")),
-          )
-        : [];
+    const uploadedFiles: Array<{
+      name: string;
+      content?: string;
+      gsUri?: string;
+      supabasePath?: string;
+      supabaseBucket?: string;
+    }> = Array.isArray(files)
+      ? files.filter(
+          (f: any) =>
+            f &&
+            typeof f.name === "string" &&
+            ((typeof f.content === "string" && f.content.trim() !== "") ||
+              (typeof f.gsUri === "string" && f.gsUri.trim() !== "") ||
+              (typeof f.supabasePath === "string" && f.supabasePath.trim() !== "")),
+        )
+      : [];
+
+    // Files sent as lightweight references (name + supabasePath only, no inline
+    // content) get their content pulled from Supabase Storage here, server-side.
+    // This lets the client resend just a small pointer on every follow-up
+    // question instead of the full CSV text each time.
+    await Promise.all(
+      uploadedFiles.map(async (f) => {
+        if (f.content || f.gsUri || !f.supabasePath) return;
+        const text = await downloadSupabaseFileText(f.supabasePath, f.supabaseBucket);
+        if (text !== null) {
+          f.content = text;
+        } else {
+          console.warn(
+            `[analyze] Could not hydrate content for '${f.name}' from Supabase path '${f.supabasePath}'`,
+          );
+        }
+      }),
+    );
     if (!isFollowUp && uploadedFiles.length === 0) {
       return res.status(400).json({ error: "Provide at least one CSV file." });
     }
@@ -1418,4 +1518,3 @@ for f in files:
   }
 
 export default app;
-

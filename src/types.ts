@@ -57,6 +57,7 @@ export interface UploadedFile {
   content?: string;
   gsUri?: string;
   supabasePath?: string;
+  supabaseBucket?: string;
   supabaseUrl?: string;
   localPath?: string;
   isLocal?: boolean;
