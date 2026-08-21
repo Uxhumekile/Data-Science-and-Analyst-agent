@@ -600,19 +600,14 @@ const App: React.FC = () => {
     };
 
     if (!isFollowUp) {
-      // Prefer sending a lightweight Supabase reference over the full file
-      // content: the server hydrates content from Storage at analyze-time.
-      // Falls back to inline content for GCS-URI files or anything that
-      // for some reason has no supabasePath (e.g. Supabase not configured).
-      payload.files = files.map((f) =>
-        f.supabasePath
-          ? {
-              name: f.name,
-              supabasePath: f.supabasePath,
-              supabaseBucket: f.supabaseBucket,
-            }
-          : f,
-      );
+      payload.files = files.map((f) => ({
+        name: f.name,
+        content: f.content,
+        size: f.size,
+        gsUri: f.gsUri,
+        supabasePath: f.supabasePath,
+        supabaseBucket: f.supabaseBucket,
+      }));
     }
 
     try {

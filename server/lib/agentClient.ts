@@ -63,34 +63,40 @@ export async function createInteraction(
 
   // Environment config
   if (opts.environmentId) {
-    payload.environment = { env_id: opts.environmentId };
+    payload.environment = opts.environmentId;
   } else {
-    const allowlist: any[] = [
-      {
+    const hasSources = Array.isArray(opts.inlineSources) && opts.inlineSources.length > 0;
+    const allowlist: any[] = [];
+
+    if (process.env.GEMINI_API_KEY) {
+      allowlist.push({
         domain: "generativelanguage.googleapis.com",
         transform: { "x-goog-api-key": process.env.GEMINI_API_KEY },
-      }
-    ];
+      });
+    }
 
     if (opts.gcsToken) {
       allowlist.push({
         domain: "storage.googleapis.com",
         transform: {
-          "Authorization": `Bearer ${opts.gcsToken}`
-        }
+          "Authorization": `Bearer ${opts.gcsToken}`,
+        },
       });
     }
 
-    allowlist.push({ domain: "*" });
-
-    const envConfig: Record<string, unknown> = {
-      type: "remote",
-      sources: opts.inlineSources ?? [],
-      network: {
-        allowlist,
-      },
-    };
-    payload.environment = envConfig;
+    if (!hasSources && allowlist.length === 0) {
+      payload.environment = "remote";
+    } else {
+      allowlist.push({ domain: "*" });
+      const envConfig: Record<string, unknown> = {
+        type: "remote",
+        sources: opts.inlineSources ?? [],
+      };
+      if (allowlist.length > 1) {
+        envConfig.network = { allowlist };
+      }
+      payload.environment = envConfig;
+    }
   }
 
   if (opts.previousInteractionId) {

@@ -149,22 +149,67 @@ type AgentSource =
   | { type: "gcs"; source: string; target: string }
   | { type: "repository"; source: string; target: string };
 
+const ALLOWED_AGENT_EXTENSIONS = new Set([
+  ".py",
+  ".md",
+  ".yaml",
+  ".yml",
+  ".txt",
+  ".json",
+  ".sh",
+  ".csv",
+  ".toml",
+  ".cfg",
+  ".ini",
+]);
+
+const IGNORED_DIRS = new Set([
+  "__pycache__",
+  ".pytest_cache",
+  "node_modules",
+  "dist",
+  "build",
+  ".git",
+  ".venv",
+  "venv",
+  "env",
+  ".vercel",
+  ".next",
+  "coverage",
+]);
+
 function loadAgentFiles(dir: string, basePath: string): AgentSource[] {
   let files: AgentSource[] = [];
   if (!fs.existsSync(dir)) return files;
 
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
+    if (entry.name.startsWith(".") || entry.name.startsWith("~")) continue;
+
     const fullPath = path.join(dir, entry.name);
     const targetPath = path.posix.join(basePath, entry.name);
+
     if (entry.isDirectory()) {
+      if (IGNORED_DIRS.has(entry.name)) continue;
       files = files.concat(loadAgentFiles(fullPath, targetPath));
     } else {
-      files.push({
-        type: "inline",
-        content: fs.readFileSync(fullPath, "utf-8"),
-        target: targetPath,
-      });
+      const ext = path.extname(entry.name).toLowerCase();
+      if (!ALLOWED_AGENT_EXTENSIONS.has(ext)) {
+        continue;
+      }
+      try {
+        const content = fs.readFileSync(fullPath, "utf-8");
+        // Ensure valid text content without null bytes
+        if (typeof content === "string" && content.trim().length > 0 && !content.includes("\0")) {
+          files.push({
+            type: "inline",
+            content,
+            target: targetPath,
+          });
+        }
+      } catch (err) {
+        console.warn(`[loadAgentFiles] Skipping unreadable file ${fullPath}:`, err);
+      }
     }
   }
   return files;
@@ -588,8 +633,16 @@ app.use("/output", express.static(path.join(process.cwd(), "output")));
         }
       }),
     );
-    if (!isFollowUp && uploadedFiles.length === 0) {
-      return res.status(400).json({ error: "Provide at least one CSV file." });
+    // If on initial run there are no valid CSV contents or URIs (e.g. storage hydration failed)
+    if (!isFollowUp) {
+      const validFiles = uploadedFiles.filter(
+        (f) => (typeof f.content === "string" && f.content.trim() !== "") || (typeof f.gsUri === "string" && f.gsUri.trim().startsWith("gs://"))
+      );
+      if (validFiles.length === 0) {
+        return res.status(400).json({
+          error: "Could not retrieve CSV file contents. Please upload your CSV file again or paste a valid GCS URI."
+        });
+      }
     }
 
     console.log(`[analyze] Skipping daily quota tracking as requested.`);
@@ -791,16 +844,22 @@ os.system("""python3 /.agents/skills/reporting/scripts/build_report.py --workspa
           const safeName = path.posix
             .basename(f.name)
             .replace(/[^a-zA-Z0-9._-]/g, "_");
-          if (f.content) {
+          if (typeof f.content === "string" && f.content.length > 0) {
+            console.log(
+              `[analyze] Attaching inline user file -> target: /.agents/data/${safeName}, content length: ${f.content.length} chars`,
+            );
             agentFiles.push({
               type: "inline",
               content: f.content,
               target: `/.agents/data/${safeName}`,
             });
-          } else if (f.gsUri) {
+          } else if (typeof f.gsUri === "string" && f.gsUri.trim().startsWith("gs://")) {
+            console.log(
+              `[analyze] Attaching GCS user file -> source: ${f.gsUri.trim()}, target: /.agents/data`,
+            );
             agentFiles.push({
               type: "gcs",
-              source: f.gsUri,
+              source: f.gsUri.trim(),
               target: "/.agents/data",
             });
           }
@@ -926,19 +985,20 @@ for f in files:
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(
-          `[analyze] Gemini API Non-2xx response. Error Payload: ${errorText}`,
-        );
-
-        let displayMessage = `Agent API error: ${response.status} - ${errorText}`;
+        let parsed: any = null;
         try {
-          const parsed = JSON.parse(errorText);
-          if (parsed?.error?.message) {
-            displayMessage = parsed.error.message;
-          }
+          parsed = JSON.parse(errorText);
         } catch (e) {
-          // ignore parsing error, stick to default
+          // not json
         }
+
+        console.error(`[analyze] Gemini Error Status: ${response.status} ${response.statusText}`);
+        console.error(`[analyze] Gemini Error Code: ${parsed?.error?.code || "N/A"}`);
+        console.error(`[analyze] Gemini Error Message: ${parsed?.error?.message || errorText}`);
+        console.error(`[analyze] Gemini Error Details: ${JSON.stringify(parsed?.error?.details || parsed || errorText)}`);
+        console.error(`[analyze] Gemini Full Raw Error: ${errorText}`);
+
+        let displayMessage = parsed?.error?.message || `Agent API error: ${response.status} - ${errorText}`;
 
         const isQuotaError =
           response.status === 429 ||
